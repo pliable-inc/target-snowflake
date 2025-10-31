@@ -60,7 +60,7 @@ def overriden_get_sink(
         if not existing_sink:
             return self.add_sqlsink(stream_name, schema, key_properties)
 
-        greedy_sink = os.enviorn.get('TARGET_SNOWFLAKE_GREEDY_SINK', 'false') == 'true'
+        greedy_sink = os.environ.get('TARGET_SNOWFLAKE_GREEDY_SINK', 'false') == 'true'
 
         if not greedy_sink:
             if (
