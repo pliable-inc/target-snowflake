@@ -20,6 +20,66 @@ logging.config.dictConfig(
     },
 )
 
+def overriden_get_sink(
+        self,
+        stream_name: str,
+        *,
+        record: dict | None = None,
+        schema: dict | None = None,
+        key_properties: t.Sequence[str] | None = None,
+    ) -> Sink:
+        """Return a sink for the given stream name.
+
+        A new sink will be created if `schema` is provided and if either `schema` or
+        `key_properties` has changed. If so, the old sink becomes archived and held
+        until the next drain_all() operation.
+
+        Developers only need to override this method if they want to provide a different
+        sink depending on the values within the `record` object. Otherwise, please see
+        `default_sink_class` property and/or the `get_sink_class()` method.
+
+        Raises :class:`singer_sdk.exceptions.RecordsWithoutSchemaException` if sink does
+        not exist and schema is not sent.
+
+        Args:
+            stream_name: Name of the stream.
+            record: Record being processed.
+            schema: Stream schema.
+            key_properties: Primary key of the stream.
+
+        Returns:
+            The sink used for this target.
+        """
+        _ = record  # Custom implementations may use record in sink selection.
+        if schema is None:
+            self._assert_sink_exists(stream_name)
+            return self._sinks_active[stream_name]
+
+        existing_sink = self._sinks_active.get(stream_name, None)
+        if not existing_sink:
+            return self.add_sqlsink(stream_name, schema, key_properties)
+
+        if (
+            existing_sink.schema != schema
+            or existing_sink.key_properties != key_properties
+        ):
+            if existing_sink.schema != schema: 
+                self.logger.info(f"schema diff: {existing_sink.schema} _ {schema}")
+            if existing_sink.key_properties != key_properties: 
+                self.logger.info(f"prop diff: {existing_sink.key_properties} _ {key_properties}")
+            
+            self.logger.info(
+                "Schema or key properties for '%s' stream have changed. "
+                "Initializing a new '%s' sink...",
+                stream_name,
+                stream_name,
+            )
+            self._sinks_to_clear.append(self._sinks_active.pop(stream_name))
+            return self.add_sqlsink(stream_name, schema, key_properties)
+
+        return existing_sink
+
+SQLTarget.get_sink = overriden_get_sink
 
 class TargetSnowflake(SQLTarget):
     """Target for Snowflake."""
