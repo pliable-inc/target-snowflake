@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging.config
 
+import os
 import click
 from singer_sdk import typing as th
 from singer_sdk.target_base import SQLTarget
