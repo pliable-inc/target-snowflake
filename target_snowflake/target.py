@@ -59,23 +59,26 @@ def overriden_get_sink(
         if not existing_sink:
             return self.add_sqlsink(stream_name, schema, key_properties)
 
-        if (
-            existing_sink.schema != schema
-            or existing_sink.key_properties != key_properties
-        ):
-            if existing_sink.schema != schema: 
-                self.logger.info(f"schema diff: {existing_sink.schema} _ {schema}")
-            if existing_sink.key_properties != key_properties: 
-                self.logger.info(f"prop diff: {existing_sink.key_properties} _ {key_properties}")
-            
-            self.logger.info(
-                "Schema or key properties for '%s' stream have changed. "
-                "Initializing a new '%s' sink...",
-                stream_name,
-                stream_name,
-            )
-            self._sinks_to_clear.append(self._sinks_active.pop(stream_name))
-            return self.add_sqlsink(stream_name, schema, key_properties)
+        greedy_sink = os.enviorn.get('GREEDY_SINK', 'false') == 'true'
+
+        if not greedy_sink:
+            if (
+                existing_sink.schema != schema
+                or existing_sink.key_properties != key_properties
+            ):
+                if existing_sink.schema != schema: 
+                    self.logger.info(f"schema diff: {existing_sink.schema} _ {schema}")
+                if existing_sink.key_properties != key_properties: 
+                    self.logger.info(f"prop diff: {existing_sink.key_properties} _ {key_properties}")
+                
+                self.logger.info(
+                    "Schema or key properties for '%s' stream have changed. "
+                    "Initializing a new '%s' sink...",
+                    stream_name,
+                    stream_name,
+                )
+                self._sinks_to_clear.append(self._sinks_active.pop(stream_name))
+                return self.add_sqlsink(stream_name, schema, key_properties)
 
         return existing_sink
 
