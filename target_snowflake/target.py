@@ -105,6 +105,15 @@ class TargetSnowflake(SQLTarget):
             ),
         ),
         th.Property(
+            "application",
+            th.StringType,
+            required=False,
+            description=(
+                "Client application name reported to Snowflake on connect; "
+                "surfaces in ACCOUNT_USAGE.SESSIONS.CLIENT_APPLICATION_ID."
+            ),
+        ),
+        th.Property(
             "add_record_metadata",
             th.BooleanType,
             default=True,
