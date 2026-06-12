@@ -257,6 +257,10 @@ class SnowflakeConnector(SQLConnector):
             },
             "client_session_keep_alive": True,  # See https://github.com/snowflakedb/snowflake-connector-python/issues/218
         }
+        if self.config.get("query_tag"):
+            # Session-level is safe here: the target owns this connection
+            # exclusively for the duration of the load.
+            connect_args["session_parameters"]["QUERY_TAG"] = self.config["query_tag"]
         if self.auth_method == SnowflakeAuthMethod.KEY_PAIR:
             connect_args["private_key"] = self.get_private_key()
         engine = sqlalchemy.create_engine(
