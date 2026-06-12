@@ -5,72 +5,66 @@ on:
     branches: [main]
     paths:
     - .github/workflows/test.yml
+    - .pytest.toml
     - target_snowflake/**
     - tests/**
-    - poetry.lock
-    - pyproject.toml
-    - tox.ini
+    - uv.lock
+    - tox.toml
   pull_request:
     branches: [main]
     paths:
     - .github/workflows/test.yml
     - target_snowflake/**
     - tests/**
-    - poetry.lock
-    - pyproject.toml
-    - tox.ini
+    - uv.lock
+    - tox.toml
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
+env:
+  FORCE_COLOR: 1
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    env:
-      GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-      SINGER_SDK_LOG_CONFIG: ./target_snowflake_logging.yaml
-      TARGET_SNOWFLAKE_USER: ${{secrets.TARGET_SNOWFLAKE_USER}}
-      TARGET_SNOWFLAKE_PASSWORD: ${{secrets.TARGET_SNOWFLAKE_PASSWORD}}
-      TARGET_SNOWFLAKE_ACCOUNT: ${{secrets.TARGET_SNOWFLAKE_ACCOUNT}}
-      TARGET_SNOWFLAKE_DATABASE: ${{secrets.TARGET_SNOWFLAKE_DATABASE}}
-      TARGET_SNOWFLAKE_WAREHOUSE: ${{secrets.TARGET_SNOWFLAKE_WAREHOUSE}}
-      TARGET_SNOWFLAKE_ROLE: ${{secrets.TARGET_SNOWFLAKE_ROLE}}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         python-version:
-        - "3.13"
-        - "3.12"
-        - "3.11"
+        - "3.14"
         - "3.10"
         os:
         - ubuntu-latest
         include:
-        - python-version: "3.13"
+        - python-version: "3.14"
           os: "macos-latest"
-        - python-version: "3.13"
+        - python-version: "3.14"
           os: "windows-latest"
+
     steps:
-    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+    - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       with:
         python-version: ${{ matrix.python-version }}
-    - name: Install Poetry
-      run: |
-        pip install poetry
-    - name: Install dependencies
-      run: |
-        poetry env use python${{ matrix.python-version }}
-        poetry install
+        version: ">=0.11"
     - name: Test with pytest
+      env:
+        SINGER_SDK_LOG_CONFIG: ./target_snowflake_logging.yaml
+        TARGET_SNOWFLAKE_USER: ${{secrets.TARGET_SNOWFLAKE_USER}}
+        TARGET_SNOWFLAKE_PASSWORD: ${{secrets.TARGET_SNOWFLAKE_PASSWORD}}
+        TARGET_SNOWFLAKE_ACCOUNT: ${{secrets.TARGET_SNOWFLAKE_ACCOUNT}}
+        TARGET_SNOWFLAKE_DATABASE: ${{secrets.TARGET_SNOWFLAKE_DATABASE}}
+        TARGET_SNOWFLAKE_WAREHOUSE: ${{secrets.TARGET_SNOWFLAKE_WAREHOUSE}}
+        TARGET_SNOWFLAKE_ROLE: ${{secrets.TARGET_SNOWFLAKE_ROLE}}
+        PYTHON_VERSION: ${{ matrix.python-version }}
       run: |
-        poetry run pytest -n auto
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uvx --with tox-uv tox -e $PYTHON_VERSION
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: snowflake-logs-py${{ matrix.python-version }}-${{ matrix.os }}
         path: snowflake.log
