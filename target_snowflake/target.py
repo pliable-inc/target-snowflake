@@ -159,6 +159,16 @@ class TargetSnowflake(SQLTarget):
             description="The initial role for the session.",
         ),
         th.Property(
+            "query_tag",
+            th.StringType,
+            required=False,
+            description=(
+                "QUERY_TAG session parameter applied to the load connection, "
+                "so the load's queries can be attributed in QUERY_HISTORY / "
+                "QUERY_ATTRIBUTION_HISTORY."
+            ),
+        ),
+        th.Property(
             "add_record_metadata",
             th.BooleanType,
             default=True,
