@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import binascii
 import urllib.parse
+import uuid
+from contextlib import contextmanager
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
@@ -14,9 +16,8 @@ import sqlalchemy
 import sqlalchemy.sql.type_api
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from singer_sdk.connectors import SQLConnector
-from singer_sdk.connectors.sql import FullyQualifiedName, JSONSchemaToSQL
 from singer_sdk.exceptions import ConfigValidationError
+from singer_sdk.sql.connector import FullyQualifiedName, JSONSchemaToSQL, SQLConnector
 from snowflake.sqlalchemy import URL
 from snowflake.sqlalchemy.base import SnowflakeIdentifierPreparer
 from snowflake.sqlalchemy.snowdialect import SnowflakeDialect
@@ -31,8 +32,9 @@ from target_snowflake.snowflake_types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Generator, Iterable, Sequence
 
+    import sqlalchemy as sa
     from sqlalchemy.engine import Engine
 
 
@@ -67,6 +69,7 @@ class SnowflakeAuthMethod(Enum):
     BROWSER = 1
     PASSWORD = 2
     KEY_PAIR = 3
+    OAUTH = 4
 
 
 class SnowflakeTimestampType(str, Enum):
@@ -103,7 +106,21 @@ class SnowflakeConnector(SQLConnector):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.table_cache: dict = {}
         self.schema_cache: dict = {}
+        self._inspector: sqlalchemy.Inspector | None = None
         super().__init__(*args, **kwargs)
+
+    @contextmanager
+    def connect(self) -> Generator[sa.Connection, None, None]:
+        """Return a SQLAlchemy connection context manager."""
+        with self._connect() as conn:
+            yield conn
+
+    @property
+    def inspector(self) -> sqlalchemy.Inspector:
+        """Return a cached Inspector instance for schema reflection."""
+        if self._inspector is None:
+            self._inspector = sqlalchemy.inspect(self._engine)
+        return self._inspector
 
     def get_table_columns(
         self,
@@ -122,7 +139,7 @@ class SnowflakeConnector(SQLConnector):
         if full_table_name in self.table_cache:
             return self.table_cache[full_table_name]
         _, schema_name, table_name = self.parse_full_table_name(full_table_name)
-        inspector = sqlalchemy.inspect(self._engine)
+        inspector = self.inspector
         columns = inspector.get_columns(table_name, schema_name)
 
         parsed_columns = {
@@ -201,17 +218,19 @@ class SnowflakeConnector(SQLConnector):
         if self.config.get("use_browser_authentication"):
             return SnowflakeAuthMethod.BROWSER
 
-        valid_auth_methods = {"private_key", "private_key_path", "password"}
+        valid_auth_methods = {"private_key", "private_key_path", "password", "oauth_access_token"}
         config_auth_methods = [x for x in self.config if x in valid_auth_methods]
         if len(config_auth_methods) != 1:
             msg = (
-                "Neither password nor private key was provided for "
+                "No password, private key, or OAuth token was provided for "
                 "authentication. For password-less browser authentication via SSO, "
                 "set use_browser_authentication config option to True."
             )
             raise ConfigValidationError(msg)
         if config_auth_methods[0] in ["private_key", "private_key_path"]:
             return SnowflakeAuthMethod.KEY_PAIR
+        if config_auth_methods[0] == "oauth_access_token":
+            return SnowflakeAuthMethod.OAUTH
         return SnowflakeAuthMethod.PASSWORD
 
     def get_sqlalchemy_url(self, config: dict) -> str:
@@ -237,6 +256,30 @@ class SnowflakeConnector(SQLConnector):
 
         return URL(**params)
 
+    def get_connect_args(self) -> dict[str, Any]:
+        """Get the connect args for the connector."""
+        connect_args = {
+            "session_parameters": {
+                "QUOTED_IDENTIFIERS_IGNORE_CASE": "TRUE",
+            },
+            "client_session_keep_alive": True,  # See https://github.com/snowflakedb/snowflake-connector-python/issues/218
+        }
+        if self.config.get("query_tag"):
+            # Session-level is safe here: the target owns this connection
+            # exclusively for the duration of the load.
+            connect_args["session_parameters"]["QUERY_TAG"] = self.config["query_tag"]
+        if self.auth_method == SnowflakeAuthMethod.KEY_PAIR:
+            connect_args["private_key"] = self.get_private_key()
+        elif self.auth_method == SnowflakeAuthMethod.OAUTH:
+            oauth_token = self.config.get("oauth_access_token", "")
+            if not oauth_token:
+                msg = "OAuth access token is required but not provided or is empty"
+                raise ConfigValidationError(msg)
+            connect_args["token"] = oauth_token
+            connect_args["authenticator"] = "oauth"
+
+        return connect_args
+
     def create_engine(self) -> Engine:
         """Creates and returns a new engine. Do not call outside of _engine.
 
@@ -251,23 +294,17 @@ class SnowflakeConnector(SQLConnector):
         Returns:
             A new SQLAlchemy Engine.
         """
-        connect_args = {
-            "session_parameters": {
-                "QUOTED_IDENTIFIERS_IGNORE_CASE": "TRUE",
-            },
-            "client_session_keep_alive": True,  # See https://github.com/snowflakedb/snowflake-connector-python/issues/218
-        }
-        if self.config.get("query_tag"):
-            # Session-level is safe here: the target owns this connection
-            # exclusively for the duration of the load.
-            connect_args["session_parameters"]["QUERY_TAG"] = self.config["query_tag"]
-        if self.auth_method == SnowflakeAuthMethod.KEY_PAIR:
-            connect_args["private_key"] = self.get_private_key()
         engine = sqlalchemy.create_engine(
             self.sqlalchemy_url,
-            connect_args=connect_args,
+            connect_args=self.get_connect_args(),
             echo=False,
         )
+
+        # Snowflake dialect doesn't natively recognise UUID columns returned by reflection
+        engine.dialect.ischema_names["UUID"] = sqlalchemy.types.Uuid
+        # Map Python's uuid.UUID to SQLAlchemy's UUID type when writing values
+        engine.dialect.colspecs[uuid.UUID] = sqlalchemy.types.Uuid
+
         with engine.connect() as conn:
             db_names = [db[1] for db in conn.execute(text("SHOW DATABASES;")).fetchall()]
             if self.config["database"] not in db_names:
@@ -364,7 +401,7 @@ class SnowflakeConnector(SQLConnector):
     def schema_exists(self, schema_name: str) -> bool:
         if schema_name in self.schema_cache:
             return True
-        schema_names = sqlalchemy.inspect(self._engine).get_schema_names()
+        schema_names = self.inspector.get_schema_names()
         self.schema_cache = schema_names
         formatter = SnowflakeIdentifierPreparer(SnowflakeDialect())
         # Make quoted schema names upper case because we create them that way
