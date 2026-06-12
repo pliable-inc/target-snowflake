@@ -268,6 +268,10 @@ class SnowflakeConnector(SQLConnector):
             # Session-level is safe here: the target owns this connection
             # exclusively for the duration of the load.
             connect_args["session_parameters"]["QUERY_TAG"] = self.config["query_tag"]
+        if self.config.get("application"):
+            # Client application name reported to Snowflake — surfaces in
+            # ACCOUNT_USAGE.SESSIONS.CLIENT_APPLICATION_ID.
+            connect_args["application"] = self.config["application"]
         if self.auth_method == SnowflakeAuthMethod.KEY_PAIR:
             connect_args["private_key"] = self.get_private_key()
         elif self.auth_method == SnowflakeAuthMethod.OAUTH:
