@@ -21,6 +21,7 @@ from singer_sdk.sql.connector import FullyQualifiedName, JSONSchemaToSQL, SQLCon
 from snowflake.sqlalchemy import URL
 from snowflake.sqlalchemy.base import SnowflakeIdentifierPreparer
 from snowflake.sqlalchemy.snowdialect import SnowflakeDialect
+from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy.sql import text
 
 from target_snowflake.snowflake_types import (
@@ -140,7 +141,25 @@ class SnowflakeConnector(SQLConnector):
             return self.table_cache[full_table_name]
         _, schema_name, table_name = self.parse_full_table_name(full_table_name)
         inspector = self.inspector
-        columns = inspector.get_columns(table_name, schema_name)
+        try:
+            columns = inspector.get_columns(table_name, schema_name)
+        except NoSuchTableError:
+            # This is only reached from column_exists() in activate_version(),
+            # which first guards on table_exists() -- so the table *is* present
+            # and a NoSuchTableError here is a reflection round-trip failure,
+            # not a missing table.
+            #
+            # Loader sessions set QUOTED_IDENTIFIERS_IGNORE_CASE=TRUE, so
+            # Snowflake folds identifiers to upper-case at CREATE time: a
+            # mixed-case full-table stream such as "Bill" / "Invoice" is
+            # physically stored as BILL / INVOICE. snowflake-sqlalchemy keys its
+            # reflected-column dict by the case-insensitive normal form of the
+            # *stored* name (normalize_name("BILL") -> "bill") but looks it up
+            # by the quoted name it was handed (normalize_name('"Bill"') ->
+            # '"Bill"'), which never matches -> bare NoSuchTableError. Strip the
+            # quotes and upper-case so the lookup normalizes to the same "bill"
+            # key the folded table is stored under.
+            columns = inspector.get_columns(table_name.strip('"').upper(), schema_name)
 
         parsed_columns = {
             col_meta["name"]: sqlalchemy.Column(
