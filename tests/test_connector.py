@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 import snowflake.sqlalchemy.custom_types as sct
+from snowflake.sqlalchemy.snowdialect import SnowflakeDialect
 from sqlalchemy import types
+from sqlalchemy.exc import NoSuchTableError
 
 from target_snowflake.connector import SnowflakeConnector, SnowflakeTimestampType
 from target_snowflake.snowflake_types import NUMBER, VARIANT
@@ -104,3 +106,63 @@ def test_singer_decimal(connector: SnowflakeConnector):
     assert isinstance(sql_type, types.DECIMAL)
     assert sql_type.precision == 38
     assert sql_type.scale == 18
+
+
+_COLUMN_ROW = [{"name": "Id", "type": types.VARCHAR(16_777_216), "nullable": True}]
+
+
+class _FoldedSchemaInspector:
+    """Models snowflake-sqlalchemy reflection of a table created under
+    QUOTED_IDENTIFIERS_IGNORE_CASE=TRUE. Snowflake folds the identifier to
+    upper-case at CREATE, so information_schema returns the stored name (e.g.
+    ``BILL``). snowdialect keys its column dict by ``normalize_name(<stored>)``
+    and raises a bare ``NoSuchTableError`` when ``normalize_name(<lookup>)`` is
+    absent -- the exact behaviour that crashed the loader. Uses the real
+    dialect ``normalize_name`` so the test is not circular."""
+
+    def __init__(self, stored_name: str = "BILL"):
+        normalize = SnowflakeDialect().normalize_name
+        self._normalize = normalize
+        self._key = normalize(stored_name)
+        self.calls: list[str] = []
+
+    def get_columns(self, table_name, schema_name=None, **_kwargs):
+        self.calls.append(table_name)
+        if self._normalize(table_name) != self._key:
+            raise NoSuchTableError(table_name)
+        return _COLUMN_ROW
+
+
+class _AlwaysOkInspector:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def get_columns(self, table_name, schema_name=None, **_kwargs):
+        self.calls.append(table_name)
+        return _COLUMN_ROW
+
+
+def test_get_table_columns_resolves_case_folded_table(connector: SnowflakeConnector):
+    """A mixed-case stream stored upper-case (QUOTED_IDENTIFIERS_IGNORE_CASE) is
+    reflected by its quoted name, misses, and is resolved by the de-quoted +
+    upper-cased retry -- verified against the real dialect normalize_name."""
+    fake = _FoldedSchemaInspector(stored_name="BILL")
+    connector._inspector = fake
+
+    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."Bill"')
+
+    assert "Id" in columns
+    assert len(fake.calls) == 2, "expected a quoted miss then a de-quoted retry"
+    assert '"' in fake.calls[0], "first attempt uses the quoted identifier"
+    assert fake.calls[1] == fake.calls[0].strip('"').upper()
+
+
+def test_get_table_columns_no_retry_when_reflection_succeeds(connector: SnowflakeConnector):
+    """When the first reflection resolves, there must be no second lookup."""
+    fake = _AlwaysOkInspector()
+    connector._inspector = fake
+
+    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."Bill"')
+
+    assert "Id" in columns
+    assert len(fake.calls) == 1
