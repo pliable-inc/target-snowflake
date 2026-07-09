@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 import snowflake.sqlalchemy.custom_types as sct
-from snowflake.sqlalchemy.snowdialect import SnowflakeDialect
 from sqlalchemy import types
 from sqlalchemy.exc import NoSuchTableError
 
@@ -111,30 +110,29 @@ def test_singer_decimal(connector: SnowflakeConnector):
 _COLUMN_ROW = [{"name": "Id", "type": types.VARCHAR(16_777_216), "nullable": True}]
 
 
-class _FoldedSchemaInspector:
-    """Models snowflake-sqlalchemy reflection of a table created under
-    QUOTED_IDENTIFIERS_IGNORE_CASE=TRUE. Snowflake folds the identifier to
-    upper-case at CREATE, so information_schema returns the stored name (e.g.
-    ``BILL``). snowdialect keys its column dict by ``normalize_name(<stored>)``
-    and raises a bare ``NoSuchTableError`` when ``normalize_name(<lookup>)`` is
-    absent -- the exact behaviour that crashed the loader. Uses the real
-    dialect ``normalize_name`` so the test is not circular."""
+class _StaleSchemaInspector:
+    """Models the reused inspector's stale schema reflection. snowflake-
+    sqlalchemy caches _get_schema_columns() per schema in ``info_cache``; the
+    first table reflected in a load freezes that map, so a table CREATEd later
+    in the same load is missing and get_columns() raises a bare
+    NoSuchTableError -- until ``info_cache`` is cleared and the schema is
+    re-reflected. Here a non-empty ``info_cache`` stands for that stale map."""
 
-    def __init__(self, stored_name: str = "BILL"):
-        normalize = SnowflakeDialect().normalize_name
-        self._normalize = normalize
-        self._key = normalize(stored_name)
-        self.calls: list[str] = []
-
-    def get_columns(self, table_name, schema_name=None, **_kwargs):
-        self.calls.append(table_name)
-        if self._normalize(table_name) != self._key:
-            raise NoSuchTableError(table_name)
-        return _COLUMN_ROW
-
-
-class _AlwaysOkInspector:
     def __init__(self):
+        self.info_cache: dict = {"schema_columns": {"ACCOUNT"}}  # stale: created before BILL
+        self.calls: list[str] = []
+
+    def get_columns(self, table_name, schema_name=None, **_kwargs):
+        self.calls.append(table_name)
+        if self.info_cache:
+            # stale cached map does not contain the just-created table
+            raise NoSuchTableError(table_name)
+        return _COLUMN_ROW  # after info_cache.clear() -> fresh reflection resolves it
+
+
+class _FreshInspector:
+    def __init__(self):
+        self.info_cache: dict = {}
         self.calls: list[str] = []
 
     def get_columns(self, table_name, schema_name=None, **_kwargs):
@@ -142,27 +140,25 @@ class _AlwaysOkInspector:
         return _COLUMN_ROW
 
 
-def test_get_table_columns_resolves_case_folded_table(connector: SnowflakeConnector):
-    """A mixed-case stream stored upper-case (QUOTED_IDENTIFIERS_IGNORE_CASE) is
-    reflected by its quoted name, misses, and is resolved by the de-quoted +
-    upper-cased retry -- verified against the real dialect normalize_name."""
-    fake = _FoldedSchemaInspector(stored_name="BILL")
+def test_get_table_columns_clears_stale_inspector_cache(connector: SnowflakeConnector):
+    """A table CREATEd after the reused inspector cached the schema map misses;
+    the fix clears info_cache and re-reflects, which resolves it."""
+    fake = _StaleSchemaInspector()
     connector._inspector = fake
 
-    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."Bill"')
+    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."BILL"')
 
     assert "Id" in columns
-    assert len(fake.calls) == 2, "expected a quoted miss then a de-quoted retry"
-    assert '"' in fake.calls[0], "first attempt uses the quoted identifier"
-    assert fake.calls[1] == fake.calls[0].strip('"').upper()
+    assert len(fake.calls) == 2, "expected a stale miss then a post-clear retry"
+    assert fake.info_cache == {}, "the stale reflection cache must be cleared"
 
 
 def test_get_table_columns_no_retry_when_reflection_succeeds(connector: SnowflakeConnector):
-    """When the first reflection resolves, there must be no second lookup."""
-    fake = _AlwaysOkInspector()
+    """When the first reflection resolves, there must be no cache clear/retry."""
+    fake = _FreshInspector()
     connector._inspector = fake
 
-    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."Bill"')
+    columns = connector.get_table_columns('"MYDB"."MYSCHEMA"."BILL"')
 
     assert "Id" in columns
     assert len(fake.calls) == 1

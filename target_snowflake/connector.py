@@ -146,20 +146,21 @@ class SnowflakeConnector(SQLConnector):
         except NoSuchTableError:
             # This is only reached from column_exists() in activate_version(),
             # which first guards on table_exists() -- so the table *is* present
-            # and a NoSuchTableError here is a reflection round-trip failure,
-            # not a missing table.
+            # and a NoSuchTableError here is a stale-reflection failure, not a
+            # missing table.
             #
-            # Loader sessions set QUOTED_IDENTIFIERS_IGNORE_CASE=TRUE, so
-            # Snowflake folds identifiers to upper-case at CREATE time: a
-            # mixed-case full-table stream such as "Bill" / "Invoice" is
-            # physically stored as BILL / INVOICE. snowflake-sqlalchemy keys its
-            # reflected-column dict by the case-insensitive normal form of the
-            # *stored* name (normalize_name("BILL") -> "bill") but looks it up
-            # by the quoted name it was handed (normalize_name('"Bill"') ->
-            # '"Bill"'), which never matches -> bare NoSuchTableError. Strip the
-            # quotes and upper-case so the lookup normalizes to the same "bill"
-            # key the folded table is stored under.
-            columns = inspector.get_columns(table_name.strip('"').upper(), schema_name)
+            # The inspector is cached for the whole load (see the `inspector`
+            # property), and snowflake-sqlalchemy caches _get_schema_columns()
+            # per *schema* on it (@reflection.cache). The first table reflected
+            # in a load freezes that schema's column map, so any table CREATEd
+            # afterward in the same load -- e.g. a fresh full-table load that
+            # creates ACCOUNT, then BILL, ... -- is absent from the cached map
+            # and reflects as a bare NoSuchTableError even though it exists.
+            # Drop the cached reflection and re-reflect so the new table is
+            # seen (this is how the pre-cached-inspector code behaved: it built
+            # a fresh inspector on every call).
+            inspector.info_cache.clear()
+            columns = inspector.get_columns(table_name, schema_name)
 
         parsed_columns = {
             col_meta["name"]: sqlalchemy.Column(
